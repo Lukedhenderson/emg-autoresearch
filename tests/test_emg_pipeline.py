@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -78,7 +79,18 @@ class EmgPipelineTests(unittest.TestCase):
 
     def test_feature_extraction_contains_required_emg_features(self) -> None:
         signal = np.sin(np.linspace(0, 2 * np.pi, 64, dtype=np.float32))
-        config = ExperimentConfig(use_sample_entropy=False)
+        config = ExperimentConfig(
+            use_sample_entropy=False,
+            feature_families={
+                "time_basic": True,
+                "time_emg": True,
+                "hjorth": True,
+                "autoregressive": True,
+                "distribution": True,
+                "frequency": True,
+                "sample_entropy": False,
+            },
+        )
         features = extract_channel_features(signal, 1000.0, config)
         required = {
             "mav",
@@ -127,6 +139,73 @@ class EmgPipelineTests(unittest.TestCase):
         self.assertIn("f1_macro", artifacts.metrics)
         self.assertGreater(artifacts.window_count, 0)
         self.assertGreater(artifacts.feature_count, 0)
+
+    def test_grouped_timeout_falls_back_to_holdout(self) -> None:
+        config = ExperimentConfig(
+            window_ms=10,
+            overlap_ratio=0.5,
+            windows_per_group_class=8,
+            max_windows_total=100,
+            split_strategy="group_kfold",
+            cv_folds=2,
+            model_family="logreg",
+            use_sample_entropy=False,
+            time_budget_seconds=1,
+        )
+        bout_frame = build_bouts(self.frame.copy())
+        rng = np.random.default_rng(42)
+        windows = enumerate_windows(bout_frame, self.bundle.sample_rate_hz, config, rng)
+        features, labels, groups = build_feature_table(bout_frame, windows, self.bundle, config, rng)
+        with patch("train.remaining_budget_seconds", return_value=0.5):
+            artifacts = evaluate_features(features, labels, groups, config, 99.5)
+        self.assertEqual(artifacts.split_strategy, "stratified_holdout_0.20")
+        self.assertEqual(artifacts.evaluation_fallback_reason, "budget")
+        self.assertIn("f1_macro", artifacts.metrics)
+
+    def test_completed_group_fold_returns_without_fallback(self) -> None:
+        config = ExperimentConfig(
+            window_ms=10,
+            overlap_ratio=0.5,
+            windows_per_group_class=8,
+            max_windows_total=100,
+            split_strategy="group_kfold",
+            cv_folds=2,
+            model_family="logreg",
+            use_sample_entropy=False,
+            time_budget_seconds=1,
+        )
+        bout_frame = build_bouts(self.frame.copy())
+        rng = np.random.default_rng(42)
+        windows = enumerate_windows(bout_frame, self.bundle.sample_rate_hz, config, rng)
+        features, labels, groups = build_feature_table(bout_frame, windows, self.bundle, config, rng)
+        with patch("train.remaining_budget_seconds", side_effect=[2.0, 1.0, -1.0]):
+            artifacts = evaluate_features(features, labels, groups, config, 100.0)
+        self.assertEqual(artifacts.split_strategy, "group_kfold_2")
+        self.assertIsNone(artifacts.evaluation_fallback_reason)
+        self.assertEqual(len(artifacts.fold_summaries), 1)
+
+    def test_raises_if_no_evaluation_mode_can_start_within_budget(self) -> None:
+        config = ExperimentConfig(
+            window_ms=10,
+            overlap_ratio=0.5,
+            windows_per_group_class=8,
+            max_windows_total=100,
+            split_strategy="group_kfold",
+            cv_folds=2,
+            model_family="logreg",
+            use_sample_entropy=False,
+            time_budget_seconds=1,
+        )
+        bout_frame = build_bouts(self.frame.copy())
+        rng = np.random.default_rng(42)
+        windows = enumerate_windows(bout_frame, self.bundle.sample_rate_hz, config, rng)
+        features, labels, groups = build_feature_table(bout_frame, windows, self.bundle, config, rng)
+        with patch("train.remaining_budget_seconds", return_value=-1.0):
+            with self.assertRaisesRegex(
+                TimeoutError,
+                "grouped or holdout split could complete",
+            ):
+                evaluate_features(features, labels, groups, config, 98.0)
 
 
 if __name__ == "__main__":

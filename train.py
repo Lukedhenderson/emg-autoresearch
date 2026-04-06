@@ -50,13 +50,13 @@ TIME_BUDGET_SECONDS = 300
 RANDOM_SEED = 42
 RESULTS_LOG_PATH = Path(__file__).resolve().parent / "results.jsonl"
 
-WINDOW_MS = 200
-WINDOW_OVERLAP_RATIO = 0.5
+WINDOW_MS = 225
+WINDOW_OVERLAP_RATIO = 0.4
 INCLUDE_CLASS_ZERO = False
 INCLUDE_CLASS_SEVEN = False
-NORMALIZATION_STRATEGY = "per_subject"  # none, per_window, per_subject, per_session
+NORMALIZATION_STRATEGY = 'per_session'
 RECTIFY_SIGNAL = False
-DETREND_SIGNAL = True
+DETREND_SIGNAL = False
 REMOVE_DC_OFFSET = True
 FEATURE_SCALING = True
 USE_PCA = False
@@ -72,7 +72,7 @@ ENABLE_CROSS_CHANNEL_SUMMARY = True
 ENABLE_CHANNEL_PAIR_FEATURES = False
 CHANNEL_PAIR_LIMIT = 4
 
-MODEL_FAMILY = "logreg"  # logreg, linear_svm, rbf_svm, random_forest, extra_trees, hist_gb, small_mlp
+MODEL_FAMILY = 'extra_trees'  # logreg, linear_svm, rbf_svm, random_forest, extra_trees, hist_gb, small_mlp
 MODEL_PARAMS = {
     "logreg": {"C": 1.5, "max_iter": 1000},
     "linear_svm": {"C": 1.0, "max_iter": 5000},
@@ -84,25 +84,23 @@ MODEL_PARAMS = {
 }
 
 SPLIT_STRATEGY = "group_kfold"  # group_kfold or stratified_holdout
-CV_FOLDS = 3
+CV_FOLDS = 2
 HOLDOUT_RATIO = 0.2
 
 FEATURE_FAMILIES = {
-    "time_basic": True,
-    "time_emg": True,
-    "hjorth": True,
     "autoregressive": True,
     "distribution": True,
     "frequency": True,
-    "sample_entropy": USE_SAMPLE_ENTROPY,
+    "hjorth": True,
+    "sample_entropy": False,
+    "time_basic": True,
+    "time_emg": True
 }
 
 FEATURE_THRESHOLDS = {
-    # Thresholds are relative to the per-window channel standard deviation unless
-    # the value is >= 1, in which case it is treated as an absolute amplitude.
-    "zc": 0.05,
-    "ssc": 0.05,
-    "wamp": 0.05,
+    "ssc": 0.04,
+    "wamp": 0.04,
+    "zc": 0.04
 }
 
 
@@ -174,6 +172,7 @@ class EvaluationArtifacts:
     session_count: int
     split_strategy: str
     fold_summaries: list[dict[str, float]]
+    evaluation_fallback_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -640,10 +639,12 @@ def build_feature_table(
 ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     del rng  # reserved for future stochastic feature pruning.
     normalization_stats = normalization_lookup(frame, bundle.channels, config)
+    signal_values = frame.loc[:, bundle.channels].to_numpy(dtype=np.float32, copy=False)
     rows: list[dict[str, float | int | str]] = []
+    append_row = rows.append
 
     for record in windows:
-        raw_window = frame.loc[record.start_idx : record.end_idx - 1, bundle.channels].to_numpy(dtype=np.float32, copy=False)
+        raw_window = signal_values[record.start_idx : record.end_idx]
         stats_key: tuple[int, int] | int | None = None
         if config.normalization_strategy == "per_subject":
             stats_key = record.subject
@@ -663,7 +664,7 @@ def build_feature_table(
                 "session_id": record.session,
             }
         )
-        rows.append(feature_row)
+        append_row(feature_row)
 
     feature_frame = pd.DataFrame(rows)
     if feature_frame.empty:
@@ -728,31 +729,50 @@ def stable_mean(metric_rows: list[dict[str, float]]) -> dict[str, float]:
     return {key: float(np.mean([row[key] for row in metric_rows])) for key in keys}
 
 
-def evaluate_features(
-    features: pd.DataFrame,
+def remaining_budget_seconds(start_time: float, time_budget_seconds: int) -> float:
+    if start_time <= 0:
+        return float("inf")
+    return time_budget_seconds - (time.time() - start_time)
+
+
+def should_fallback_from_group_kfold(start_time: float, config: ExperimentConfig) -> bool:
+    remaining_budget = remaining_budget_seconds(start_time, config.time_budget_seconds)
+    if remaining_budget <= 0:
+        return False
+    estimated_group_fold_budget = config.time_budget_seconds / max(config.cv_folds, 1)
+    return remaining_budget <= estimated_group_fold_budget
+
+
+def build_split_iterator(
+    feature_values: np.ndarray,
     labels: np.ndarray,
     groups: np.ndarray,
     config: ExperimentConfig,
+    split_strategy_name: str,
+) -> tuple[Iterable[tuple[np.ndarray, np.ndarray]], str]:
+    if split_strategy_name == "group_kfold" and len(np.unique(groups)) >= config.cv_folds:
+        splitter = GroupKFold(n_splits=config.cv_folds)
+        return splitter.split(feature_values, labels, groups), f"group_kfold_{config.cv_folds}"
+    splitter = StratifiedShuffleSplit(n_splits=1, test_size=config.holdout_ratio, random_state=config.random_seed)
+    return splitter.split(feature_values, labels), f"stratified_holdout_{config.holdout_ratio:.2f}"
+
+
+def run_split_evaluation(
+    feature_values: np.ndarray,
+    labels: np.ndarray,
+    groups: np.ndarray,
+    pipeline: Pipeline,
+    config: ExperimentConfig,
     start_time: float,
-) -> EvaluationArtifacts:
-    pipeline = build_pipeline(config)
-    feature_values = features.to_numpy(dtype=np.float32)
+    split_strategy_name: str,
+) -> tuple[list[dict[str, float]], list[dict[str, dict[str, float]]], list[dict[str, float]], str]:
     metric_rows: list[dict[str, float]] = []
     per_class_rows: list[dict[str, dict[str, float]]] = []
     fold_summaries: list[dict[str, float]] = []
+    split_iterator, resolved_split_strategy = build_split_iterator(feature_values, labels, groups, config, split_strategy_name)
 
-    if config.split_strategy == "group_kfold" and len(np.unique(groups)) >= config.cv_folds:
-        splitter = GroupKFold(n_splits=config.cv_folds)
-        split_iterator = splitter.split(feature_values, labels, groups)
-        split_strategy = f"group_kfold_{config.cv_folds}"
-    else:
-        splitter = StratifiedShuffleSplit(n_splits=1, test_size=config.holdout_ratio, random_state=config.random_seed)
-        split_iterator = splitter.split(feature_values, labels)
-        split_strategy = f"stratified_holdout_{config.holdout_ratio:.2f}"
-
-    enforce_budget = start_time > 0
     for fold_index, (train_idx, test_idx) in enumerate(split_iterator, start=1):
-        if enforce_budget and time.time() - start_time > config.time_budget_seconds:
+        if remaining_budget_seconds(start_time, config.time_budget_seconds) <= 0:
             break
         model = clone(pipeline)
         model.fit(feature_values[train_idx], labels[train_idx])
@@ -766,8 +786,52 @@ def evaluate_features(
         per_class_rows.append(per_class_metrics(labels[test_idx], predictions))
         fold_summaries.append({"fold": float(fold_index), **fold_metrics})
 
+    return metric_rows, per_class_rows, fold_summaries, resolved_split_strategy
+
+
+def evaluate_features(
+    features: pd.DataFrame,
+    labels: np.ndarray,
+    groups: np.ndarray,
+    config: ExperimentConfig,
+    start_time: float,
+) -> EvaluationArtifacts:
+    pipeline = build_pipeline(config)
+    feature_values = features.to_numpy(dtype=np.float32)
+    fallback_reason: str | None = None
+    requested_split_strategy = config.split_strategy
+    effective_split_strategy = requested_split_strategy
+    if requested_split_strategy == "group_kfold" and should_fallback_from_group_kfold(start_time, config):
+        effective_split_strategy = "stratified_holdout"
+        fallback_reason = "budget"
+
+    metric_rows, per_class_rows, fold_summaries, split_strategy = run_split_evaluation(
+        feature_values,
+        labels,
+        groups,
+        pipeline,
+        config,
+        start_time,
+        effective_split_strategy,
+    )
+
+    if not metric_rows and requested_split_strategy == "group_kfold" and effective_split_strategy == "group_kfold":
+        metric_rows, per_class_rows, fold_summaries, split_strategy = run_split_evaluation(
+            feature_values,
+            labels,
+            groups,
+            pipeline,
+            config,
+            start_time,
+            "stratified_holdout",
+        )
+        if metric_rows:
+            fallback_reason = "budget"
+
     if not metric_rows:
-        raise TimeoutError("Evaluation exceeded the time budget before completing a split.")
+        raise TimeoutError(
+            "Evaluation exceeded the time budget before any grouped or holdout split could complete."
+        )
 
     averaged_per_class: dict[str, dict[str, float]] = {}
     for class_name in sorted({class_name for row in per_class_rows for class_name in row.keys()}, key=int):
@@ -785,6 +849,7 @@ def evaluate_features(
         session_count=int(len(np.unique(groups))),  # subject grouping is the leakage-aware default
         split_strategy=split_strategy,
         fold_summaries=fold_summaries,
+        evaluation_fallback_reason=fallback_reason,
     )
 
 
@@ -837,6 +902,7 @@ def build_run_payload(
         payload.update(
             {
                 "split_strategy": artifacts.split_strategy,
+                "evaluation_fallback_reason": artifacts.evaluation_fallback_reason,
                 "metrics": artifacts.metrics,
                 "per_class_metrics": artifacts.per_class,
                 "fold_summaries": artifacts.fold_summaries,
