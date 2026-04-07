@@ -74,7 +74,7 @@ uv run python -m unittest discover -s tests -p 'test_*.py'
 
 `prepare.py` extracts the CSV into `.cache_emg/`, which is intentionally ignored from version control.
 
-## Public Artifacts
+## Artifacts
 
 - [`artifacts/final_model.joblib`](/Users/lukehenderson/Documents/Projects/emg/artifacts/final_model.joblib): final exported classifier
 - [`artifacts/final_metrics.json`](/Users/lukehenderson/Documents/Projects/emg/artifacts/final_metrics.json): final held-out metrics
