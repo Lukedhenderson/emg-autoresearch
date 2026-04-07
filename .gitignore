@@ -1,25 +1,31 @@
-# Python-generated files
+# OS and editor noise
+.DS_Store
+
+# Python caches and build output
 __pycache__/
 *.py[oc]
+*.egg-info/
 build/
 dist/
 wheels/
-*.egg-info
+.pytest_cache/
+.ipynb_checkpoints/
 
-# Virtual environments
-.venv
+# Local environments
+.venv/
+venv/
+
+# Generated local cache and logs
+.cache_emg/
+run.log
+*.log
+
+# Local workflow leftovers
 worktrees/
 results/
 queue/
 
-# Agent prompt files (generated per-session by launchers)
+# Agent prompt files generated outside the tracked project instructions
 CLAUDE.md
 AGENTS.md
 
-# Experimental code/artifacts
-dev/
-
-# Results file
-results.tsv
-results.jsonl
-.cache_emg/

@@ -1,124 +1,83 @@
-# autoresearch: EMG edition
+# EMG Gesture Classification
 
-This repo is now an autoresearch benchmark for EMG gesture classification instead of language-model pretraining. The shape stays close to Karpathy's original idea:
+An organized public snapshot of the final EMG gesture-classification project. This repository contains the training code, the final notebook, the trained model artifact, and the recorded evaluation results.
 
-- one machine
-- one process
-- one primary mutation surface: `train.py`
-- one fixed wall-clock budget per experiment: 5 minutes
-- simple, self-contained Python
+This project was run as an autoresearch experiment inspired directly by Andrej Karpathy's `autoresearch` repository. It follows the same core design philosophy: one machine, one main training surface, compact self-contained code, fixed-time experiments, and an append-only results log that makes the research loop inspectable.
 
-The search space is intentionally biased toward signal processing and feature engineering. The benchmark is designed to reward strong handcrafted EMG pipelines over unnecessary model complexity.
+In this adaptation, the language-model benchmark idea is carried over into EMG gesture classification. The search space is biased toward signal processing, feature engineering, and lightweight classifiers rather than large training infrastructure.
+
+## Final Result
+
+The final exported model metrics are stored in [`artifacts/final_metrics.json`](/Users/lukehenderson/Documents/Projects/emg/artifacts/final_metrics.json):
+
+- `accuracy`: `0.9284`
+- `f1_macro`: `0.9283`
+- `balanced_accuracy`: `0.9282`
+
+The trained model is available in [`artifacts/final_model.joblib`](/Users/lukehenderson/Documents/Projects/emg/artifacts/final_model.joblib), and the full notebook used for the final pass is in [`notebooks/final_pipeline.ipynb`](/Users/lukehenderson/Documents/Projects/emg/notebooks/final_pipeline.ipynb).
+
+## Autoresearch Framing
+
+Like Karpathy's original `autoresearch` setup, this repo keeps the system deliberately simple and legible:
+
+- one primary mutation surface in [`train.py`](/Users/lukehenderson/Documents/Projects/emg/train.py)
+- one local machine and one compact Python codebase
+- fixed-budget experiments rather than open-ended training infrastructure
+- explicit logged outcomes in [`artifacts/experiment_history.jsonl`](/Users/lukehenderson/Documents/Projects/emg/artifacts/experiment_history.jsonl)
+- emphasis on interpretable changes over framework-heavy abstraction
+
+The main difference is domain. Instead of language-model pretraining, this repository applies the same experimental shape to EMG gesture classification.
+
+## Repository Layout
+
+- [`train.py`](/Users/lukehenderson/Documents/Projects/emg/train.py) contains the main feature-engineering and training pipeline.
+- [`prepare.py`](/Users/lukehenderson/Documents/Projects/emg/prepare.py) extracts the bundled dataset and writes lightweight metadata.
+- [`tests/test_emg_pipeline.py`](/Users/lukehenderson/Documents/Projects/emg/tests/test_emg_pipeline.py) covers the core pipeline logic with smoke tests.
+- [`data/`](/Users/lukehenderson/Documents/Projects/emg/data) contains the raw dataset zip and dataset description.
+- [`artifacts/`](/Users/lukehenderson/Documents/Projects/emg/artifacts) contains public outputs: metrics, model, progress plot, and experiment history.
+- [`notebooks/`](/Users/lukehenderson/Documents/Projects/emg/notebooks) contains the final analysis notebook.
 
 ## Dataset
 
-The repo expects two local assets that are already present here:
+The project uses the bundled MYO armband EMG dataset in [`data/EMG-data.csv.zip`](/Users/lukehenderson/Documents/Projects/emg/data/EMG-data.csv.zip) with the companion description in [`data/dataset_description.txt`](/Users/lukehenderson/Documents/Projects/emg/data/dataset_description.txt).
 
-- `EMG-data.csv.zip`
-- `dataset_description.txt`
+The pipeline assumes:
 
-From the dataset description and the analytics-ready CSV, the benchmark assumes:
+- eight EMG channels: `channel1` through `channel8`
+- `label` is the subject identifier
+- negative `time` jumps within a subject mark a new session
+- class `0` is transition/unmarked data and is excluded by default
+- class `7` is sparse and excluded by default from grouped evaluation
 
-- eight MYO EMG channels: `channel1` through `channel8`
-- `class` labels:
-  - `0`: unmarked transition data
-  - `1`: hand at rest
-  - `2`: fist
-  - `3`: wrist flexion
-  - `4`: wrist extension
-  - `5`: radial deviation
-  - `6`: ulnar deviation
-  - `7`: extended palm, only present for a small subset of subjects
-- `label` is the subject ID
-- negative `time` jumps within a subject indicate the second recording session
-- the effective sample rate is inferred from positive time deltas and is approximately `1000 Hz`; the fallback is `1000 Hz`
+## What The Pipeline Does
 
-Class `0` is excluded by default because it is unmarked/non-gesture data. Class `7` is disabled by default because only two subjects appear to contain it, which makes grouped evaluation unstable.
+The training pipeline is built around handcrafted EMG features rather than a large end-to-end neural model. A typical run:
 
-## Main Files
+1. prepares and loads the dataset
+2. reconstructs subject/session boundaries
+3. builds gesture-safe windows
+4. extracts EMG time-domain and frequency-domain features
+5. trains a compact classifier
+6. evaluates with grouped splits to reduce leakage
+7. appends a structured record to [`artifacts/experiment_history.jsonl`](/Users/lukehenderson/Documents/Projects/emg/artifacts/experiment_history.jsonl)
 
-- `train.py` — the main experiment engine and mutation surface
-- `prepare.py` — lightweight dataset extraction and metadata generation
-- `program.md` — autoresearch instructions for the agent
-- `tests/test_emg_pipeline.py` — unit and integration smoke tests
+The best grouped cross-validation result is summarized in [`artifacts/best_grouped_result.json`](/Users/lukehenderson/Documents/Projects/emg/artifacts/best_grouped_result.json).
 
-## Quick Start
+## Reproduce
 
 ```bash
 uv sync
 uv run prepare.py
 uv run train.py
-python -m unittest
+uv run python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-`prepare.py` extracts the CSV into `.cache_emg/` and writes explicit metadata assumptions. `train.py` can trigger preparation implicitly if needed.
+`prepare.py` extracts the CSV into `.cache_emg/`, which is intentionally ignored from version control.
 
-## Experiment Design
+## Public Artifacts
 
-Each run:
-
-1. loads the EMG dataset
-2. reconstructs subject/session structure
-3. segments the signal into fixed windows without crossing subject, session, or gesture-bout boundaries
-4. extracts handcrafted EMG features
-5. trains a compact classifier
-6. evaluates with leakage-aware grouped splits
-7. appends a JSONL record to `results.jsonl`
-
-Primary metric:
-
-- `f1_macro`
-
-Also logged:
-
-- `accuracy`
-- `balanced_accuracy`
-- per-class precision/recall/F1/support
-- runtime
-- model family
-- preprocessing choices
-- feature families
-- windowing settings
-- feature count and window count
-
-## Feature Families
-
-The benchmark includes:
-
-- basic time-domain EMG features: MAV, RMS, VAR, WL, ZC, SSC
-- additional EMG features: WAMP, IEMG, AAC, DASDV, log detector, SSI, v-order, peak-to-peak
-- distribution features: skewness, kurtosis
-- Hjorth parameters: activity, mobility, complexity
-- autoregressive coefficients
-- optional sample entropy
-- frequency-domain features: MDF, MNF, total power, peak frequency, coarse bandpowers, spectral entropy
-- optional across-channel summary statistics
-
-## Model Families
-
-The default benchmark focuses on lightweight models:
-
-- logistic regression
-- linear SVM
-- RBF SVM
-- random forest
-- extra trees
-- histogram gradient boosting
-- small MLP
-
-The intent is not to turn this into a deep-learning-heavy raw-signal repo. If a neural baseline is added later, it should remain secondary and lightweight.
-
-## Logging
-
-Each run appends one JSON object to `results.jsonl`. This is the append-only record that autoresearch should read before planning the next experiment.
-
-## Testing
-
-The test suite covers:
-
-- session reconstruction assumptions
-- boundary-safe window generation
-- deterministic feature extraction on small synthetic signals
-- end-to-end smoke execution on a tiny synthetic EMG fixture
-# emg-autoresearch
-# emg-autoresearch
+- [`artifacts/final_model.joblib`](/Users/lukehenderson/Documents/Projects/emg/artifacts/final_model.joblib): final exported classifier
+- [`artifacts/final_metrics.json`](/Users/lukehenderson/Documents/Projects/emg/artifacts/final_metrics.json): final held-out metrics
+- [`artifacts/best_grouped_result.json`](/Users/lukehenderson/Documents/Projects/emg/artifacts/best_grouped_result.json): best grouped CV run summary
+- [`artifacts/experiment_history.jsonl`](/Users/lukehenderson/Documents/Projects/emg/artifacts/experiment_history.jsonl): experiment log
+- [`artifacts/progress.png`](/Users/lukehenderson/Documents/Projects/emg/artifacts/progress.png): progress visualization

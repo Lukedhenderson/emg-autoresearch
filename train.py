@@ -48,7 +48,8 @@ from prepare import DEFAULT_SAMPLE_RATE_HZ, ensure_prepared, load_metadata
 
 TIME_BUDGET_SECONDS = 300
 RANDOM_SEED = 42
-RESULTS_LOG_PATH = Path(__file__).resolve().parent / "results.jsonl"
+ARTIFACTS_DIR = Path(__file__).resolve().parent / "artifacts"
+RESULTS_LOG_PATH = ARTIFACTS_DIR / "experiment_history.jsonl"
 
 WINDOW_MS = 225
 WINDOW_OVERLAP_RATIO = 0.4

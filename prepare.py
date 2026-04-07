@@ -23,6 +23,7 @@ import pandas as pd
 
 
 REPO_ROOT = Path(__file__).resolve().parent
+DATA_DIR = REPO_ROOT / "data"
 DATASET_ZIP_NAME = "EMG-data.csv.zip"
 DATASET_DESCRIPTION_NAME = "dataset_description.txt"
 CACHE_DIR = REPO_ROOT / ".cache_emg"
@@ -52,8 +53,8 @@ class DatasetMetadata:
 
 
 def locate_dataset_assets(repo_root: Path = REPO_ROOT) -> tuple[Path, Path]:
-    zip_path = repo_root / DATASET_ZIP_NAME
-    description_path = repo_root / DATASET_DESCRIPTION_NAME
+    zip_path = repo_root / DATA_DIR.name / DATASET_ZIP_NAME
+    description_path = repo_root / DATA_DIR.name / DATASET_DESCRIPTION_NAME
     if not zip_path.exists():
         raise FileNotFoundError(f"Dataset zip not found at {zip_path}")
     if not description_path.exists():
